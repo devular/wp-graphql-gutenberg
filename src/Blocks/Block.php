@@ -122,8 +122,14 @@ class Block implements ArrayAccess {
 	}
 
 	protected static function parse_attributes($data, $block_type) {
-		$types = [$block_type['attributes']];
 		$attributes = $data['attrs'];
+		if ($block_type === null) {
+			return [
+				'attributes' => $attributes
+			];
+		}
+
+		$types = [$block_type['attributes']];
 
 		foreach ($block_type['deprecated'] ?? [] as $deprecated) {
 			if (!empty($deprecated['attributes'])) {
@@ -142,7 +148,13 @@ class Block implements ArrayAccess {
 
 			$validator = new Validator();
 
-			$result = $validator->schemaValidation((object) $attributes, $schema);
+			if (empty($data['innerHTML'])) {
+				$data['innerHTML'] = '<span data-warning="This block does not contain a render template"></span>';
+			}
+
+			$obj_attrs = json_decode(json_encode($attributes, JSON_FORCE_OBJECT));
+
+			$result = $validator->schemaValidation($obj_attrs, $schema);
 
 			if ($result->isValid()) {
 				return [
@@ -178,6 +190,20 @@ class Block implements ArrayAccess {
 
 		$this->attributes = $result['attributes'];
 		$this->attributesType = $result['type'];
+
+		$this->dynamicContent = $this->render_dynamic_content();
+
+	}
+
+	private function render_dynamic_content() {
+		$registry = \WP_Block_Type_Registry::get_instance();
+		$server_block_type = $registry->get_registered($this->name);
+
+		if (empty($server_block_type)) {
+			return null;
+		}
+
+		return $server_block_type->render($this->attributes);
 	}
 
 	public function offsetExists($offset) {
