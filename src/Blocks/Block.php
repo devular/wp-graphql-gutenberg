@@ -1,224 +1,238 @@
 <?php
 
 namespace WPGraphQLGutenberg\Blocks;
+
 use ArrayAccess;
-use GraphQLRelay\Relay;
 use Opis\JsonSchema\Schema;
 use Opis\JsonSchema\Validator;
 use voku\helper\HtmlDomParser;
 
-class Block implements ArrayAccess {
-	public static function create_blocks($blocks, $post_id, $registry, $parent = null) {
-		$result = [];
-		$order = 0;
+class Block implements ArrayAccess
+{
+    public static function create_blocks($blocks, $post_id, $registry, $parent = null)
+    {
+        $result = [];
+        $order = 0;
 
-		foreach ($blocks as $block) {
-			if (empty($block['blockName'])) {
+        foreach ($blocks as $block) {
+            if (empty($block['blockName'])) {
+                if ('"\n\n"' === json_encode($block['innerHTML'])) {
+                    continue;
+                }
 
-				if (json_encode($block['innerHTML']) === '"\n\n"') {
-					continue;
-				}
+                $block['blockName'] = 'core/freeform';
+            }
 
-				$block['blockName'] = 'core/freeform';
-			}
+            $result[] = new Block($block, $post_id, $registry, $order, $parent);
+            ++$order;
+        }
 
-			$result[] = new Block($block, $post_id, $registry, $order, $parent);
-			$order++;
-		}
+        return $result;
+    }
 
-		return $result;
-	}
+    protected static function strip_newlines($html)
+    {
+        return preg_replace('/^\n|\n$/', '', $html);
+    }
 
-	protected static function strip_newlines($html) {
-		return preg_replace('/^\n|\n$/', '', $html);
-	}
+    protected static function parse_inner_content($data)
+    {
+        $result = '';
+        $index = 0;
 
-	protected static function parse_inner_content($data) {
-		$result = '';
-		$index = 0;
+        foreach ($data['innerContent'] as $value) {
+            if (null === $value) {
+                $result = $result.self::parse_inner_content($data['innerBlocks'][$index]);
+                ++$index;
+            } else {
+                $result = $result.self::strip_newlines($value);
+            }
+        }
 
-		foreach ($data['innerContent'] as $value) {
-			if ($value === null) {
-				$result = $result . self::parse_inner_content($data['innerBlocks'][$index]);
-				$index++;
-			} else {
-				$result = $result . self::strip_newlines($value);
-			}
-		}
+        return $result;
+    }
 
-		return $result;
-	}
+    protected static function source_attributes($node, $type)
+    {
+        $result = [];
 
-	protected static function source_attributes($node, $type) {
-		$result = [];
+        foreach ($type as $key => $value) {
+            $source = $value['source'] ?? null;
 
-		foreach ($type as $key => $value) {
-			$source = $value['source'] ?? null;
+            switch ($source) {
+                case 'html':
+                    $source_node = !empty($value['selector']) ? $node->findOne($value['selector']) : $node;
 
-			switch ($source) {
-				case 'html':
-					$source_node = !empty($value['selector']) ? $node->findOne($value['selector']) : $node;
+                    if ($source_node) {
+                        if (!empty($value['multiline'])) {
+                            $tag = $value['multiline'];
 
-					if ($source_node) {
-						if (!empty($value['multiline'])) {
-							$tag = $value['multiline'];
+                            $value = '';
 
-							$value = '';
+                            foreach ($source_node->childNodes as $childNode) {
+                                $childNode = new \voku\helper\SimpleHtmlDom($childNode);
 
-							foreach ($source_node->childNodes as $childNode) {
+                                if (strtolower($childNode->tag) !== $tag) {
+                                    continue;
+                                }
 
-								$childNode = new \voku\helper\SimpleHtmlDom($childNode);
+                                $value = $value.$childNode->outerhtml;
+                            }
 
-								if (strtolower($childNode->tag) !== $tag) {
-									continue;
-								}
+                            $result[$key] = $value;
+                        } else {
+                            $result[$key] = $source_node->innerhtml;
+                        }
+                    }
 
-								$value = $value . $childNode->outerhtml;
-							}
-							
-							$result[$key] = $value;
-						} else {
-							$result[$key] = $source_node->innerhtml;
-						}
+                    break;
+                case 'attribute':
+                    $source_node = $value['selector'] ? $node->findOne($value['selector']) : $node;
 
-					}
+                    if ($source_node) {
+                        $result[$key] = $source_node->getAttribute($value['attribute']);
+                    }
+                    break;
+                case 'text':
+                    $source_node = $value['selector'] ? $node->findOne($value['selector']) : $node;
 
-					break;
-				case 'attribute':
-					$source_node = $value['selector'] ? $node->findOne($value['selector']) : $node;
+                    if ($source_node) {
+                        $result[$key] = $source_node->plaintext;
+                    }
+                    break;
+                case 'tag':
+                    $result[$key] = $node->tag;
+                    break;
 
-					if ($source_node) {
-						$result[$key] = $source_node->getAttribute($value['attribute']);
-					}
-					break;
-				case 'text':
-					$source_node = $value['selector'] ? $node->findOne($value['selector']) : $node;
+                case 'query':
+                    foreach ($node->find($value['selector']) as $source_node) {
+                        $result[$key][] = self::source_attributes($source_node, $value['query']);
+                    }
+                    break;
 
-					if ($source_node) {
-						$result[$key] = $source_node->plaintext;
-					}
-					break;
-				case 'tag':
-					$result[$key] = $node->tag;
-					break;
+                default:
+                // @TODO: Throw exception
+                // pass
+            }
 
-				case 'query':
-					foreach ($node->find($value['selector']) as $source_node) {
-						$result[$key][] = self::source_attributes($source_node, $value['query']);
-					}
-					break;
+            if (empty($result[$key]) && isset($value['default'])) {
+                $result[$key] = $value['default'];
+            }
+        }
 
-				default:
-				// @TODO: Throw exception
-				// pass
-			}
+        return $result;
+    }
 
-			if (empty($result[$key]) && isset($value['default'])) {
-				$result[$key] = $value['default'];
-			}
-		}
+    protected static function parse_attributes($data, $block_type)
+    {
+        $attributes = $data['attrs'];
+        if (null === $block_type) {
+            return [
+                'attributes' => $attributes,
+            ];
+        }
 
-		return $result;
-	}
+        $types = [$block_type['attributes']];
 
-	protected static function parse_attributes($data, $block_type) {
-		$attributes = $data['attrs'];
-		if ($block_type === null) {
-			return [
-				'attributes' => $attributes
-			];
-		}
+        foreach ($block_type['deprecated'] ?? [] as $deprecated) {
+            if (!empty($deprecated['attributes'])) {
+                $types[] = $deprecated['attributes'];
+            }
+        }
 
-		$types = [$block_type['attributes']];
+        foreach ($types as $type) {
+            $schema = Schema::fromJsonString(
+                json_encode([
+                    'type' => 'object',
+                    'properties' => $type,
+                    'additionalProperties' => false,
+                ])
+            );
 
-		foreach ($block_type['deprecated'] ?? [] as $deprecated) {
-			if (!empty($deprecated['attributes'])) {
-				$types[] = $deprecated['attributes'];
-			}
-		}
+            $validator = new Validator();
 
-		foreach ($types as $type) {
-			$schema = Schema::fromJsonString(
-				json_encode([
-					'type' => 'object',
-					'properties' => $type,
-					'additionalProperties' => false
-				])
-			);
+            if (empty($data['innerHTML'])) {
+                $data['innerHTML'] = '<span data-warning="This block does not contain a render template"></span>';
+            }
 
-			$validator = new Validator();
+            $obj_attrs = json_decode(json_encode($attributes, JSON_FORCE_OBJECT));
 
-			if (empty($data['innerHTML'])) {
-				$data['innerHTML'] = '<span data-warning="This block does not contain a render template"></span>';
-			}
+            $result = $validator->schemaValidation($obj_attrs, $schema);
 
-			$obj_attrs = json_decode(json_encode($attributes, JSON_FORCE_OBJECT));
+            if ($result->isValid()) {
+                $filtered_attributes = [];
 
-			$result = $validator->schemaValidation($obj_attrs, $schema);
+                foreach ($attributes as $key => $value) {
+                    $filtered_attributes[$key] = apply_filters('the_content', $value);
+                }
 
-			if ($result->isValid()) {
-				return [
-					'attributes' => array_merge(
-						self::source_attributes(HtmlDomParser::str_get_html($data['innerHTML']), $type),
-						$attributes
-					),
-					'type' => $type
-				];
-			}
-		}
+                return [
+                    'attributes' => array_merge(
+                        self::source_attributes(HtmlDomParser::str_get_html($data['innerHTML']), $type),
+                        $filtered_attributes
+                    ),
+                    'type' => $type,
+                ];
+            }
+        }
 
-		return [
-			'attributes' => $attributes,
-			'type' => $block_type['attributes']
-		];
-	}
+        return [
+            'attributes' => $attributes,
+            'type' => $block_type['attributes'],
+        ];
+    }
 
-	public function __construct($data, $post_id, $registry, $order, $parent) {
-		$this->innerBlocks = self::create_blocks($data['innerBlocks'], $post_id, $registry, $this);
+    public function __construct($data, $post_id, $registry, $order, $parent)
+    {
+        $this->innerBlocks = self::create_blocks($data['innerBlocks'], $post_id, $registry, $this);
 
-		$this->name = $data['blockName'];
-		$this->postId = $post_id;
-		$this->blockType = $registry[$this->name];
-		$this->originalContent = self::strip_newlines($data['innerHTML']);
-		$this->saveContent = self::parse_inner_content($data);
-		$this->order = $order;
-		$this->get_parent = function () use (&$parent) {
-			return $parent;
-		};
+        $this->name = $data['blockName'];
+        $this->postId = $post_id;
+        $this->blockType = $registry[$this->name];
+        $this->originalContent = self::strip_newlines($data['innerHTML']);
+        $this->saveContent = self::parse_inner_content($data);
+        $this->order = $order;
+        $this->get_parent = function () use (&$parent) {
+            return $parent;
+        };
 
-		$result = self::parse_attributes($data, $this->blockType);
+        $result = self::parse_attributes($data, $this->blockType);
 
-		$this->attributes = $result['attributes'];
-		$this->attributesType = $result['type'];
+        $this->attributes = $result['attributes'];
+        $this->attributesType = $result['type'];
 
-		$this->dynamicContent = $this->render_dynamic_content();
+        $this->dynamicContent = $this->render_dynamic_content();
+    }
 
-	}
+    private function render_dynamic_content()
+    {
+        $registry = \WP_Block_Type_Registry::get_instance();
+        $server_block_type = $registry->get_registered($this->name);
 
-	private function render_dynamic_content() {
-		$registry = \WP_Block_Type_Registry::get_instance();
-		$server_block_type = $registry->get_registered($this->name);
+        if (empty($server_block_type)) {
+            return null;
+        }
 
-		if (empty($server_block_type)) {
-			return null;
-		}
+        return $server_block_type->render($this->attributes);
+    }
 
-		return $server_block_type->render($this->attributes);
-	}
+    public function offsetExists($offset)
+    {
+        return isset($this->$offset);
+    }
 
-	public function offsetExists($offset) {
-		return isset($this->$offset);
-	}
+    public function offsetGet($offset)
+    {
+        return $this->$offset;
+    }
 
-	public function offsetGet($offset) {
-		return $this->$offset;
-	}
+    public function offsetSet($offset, $value)
+    {
+        $this->$offset = $value;
+    }
 
-	public function offsetSet($offset, $value) {
-		$this->$offset = $value;
-	}
-
-	public function offsetUnset($offset) {
-		unset($this->$offset);
-	}
+    public function offsetUnset($offset)
+    {
+        unset($this->$offset);
+    }
 }
